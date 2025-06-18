@@ -6,14 +6,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-type Args struct {
-	GitUrl     string `arg:"-g,--git,required" help:"Source of git repository."`
-	WebsiteUrl string `arg:"-u,--url" help:"Source of the vulnerable website."` // TODO: Make required
-	DisableWeb bool   `arg:"-w,--web" help:"Disables the website."`
-	Port       int    `arg:"-p,--port" default:"8080" help:"Port for the website."`
-}
-
-func PrintError(err error) {
+func PrintError(err error, msg string) {
 	if err != nil {
 		prefix := lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#FF0000")).
@@ -21,8 +14,7 @@ func PrintError(err error) {
 			Render("[!] Error:")
 
 		message := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#FFFFFF")).
-			Render(" " + err.Error())
+			Render(" " + msg + "\n" + err.Error())
 
 		fmt.Println(prefix + message)
 	}
@@ -35,7 +27,6 @@ func PrintInfo(info string) {
 		Render("[*] Info:")
 
 	message := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#FFFFFF")).
 		Render(" " + info)
 
 	fmt.Println(prefix + message)
