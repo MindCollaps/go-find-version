@@ -9,7 +9,7 @@ import (
 func PrintError(err error, msg string) {
 	if err != nil {
 		prefix := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#FF0000")).
+			Foreground(lipgloss.Color("1")).
 			Bold(true).
 			Render("[!] Error:")
 
@@ -22,7 +22,7 @@ func PrintError(err error, msg string) {
 
 func PrintInfo(info string) {
 	prefix := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#0000FF")).
+		Foreground(lipgloss.Color("4")).
 		Bold(true).
 		Render("[*] Info:")
 
