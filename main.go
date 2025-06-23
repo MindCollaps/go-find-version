@@ -4,7 +4,6 @@ import (
 	"github.com/alexflint/go-arg"
 	"go-find-version/engine"
 	"go-find-version/utils"
-	"go-find-version/web"
 	"os"
 	"os/signal"
 	"syscall"
@@ -16,7 +15,7 @@ func main() {
 	webEnabled := !args.DisableWeb
 
 	if webEnabled {
-		web.Init(args.Port)
+		//web.Init(args.Port)
 	}
 
 	engine.Run(args)

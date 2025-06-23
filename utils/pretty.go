@@ -31,3 +31,13 @@ func PrintInfo(info string) {
 
 	fmt.Println(prefix + message)
 }
+
+func PrintWarning(warning string) {
+	prefix := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("4")).
+		Bold(true).
+		Render("[!] Warning:")
+	message := lipgloss.NewStyle().
+		Render(" " + warning)
+	fmt.Println(prefix + message)
+}

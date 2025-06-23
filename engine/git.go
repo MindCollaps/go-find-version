@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/charmbracelet/bubbles/progress"
@@ -16,6 +17,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,7 +25,7 @@ import (
 )
 
 var patterns = []string{
-	"*php",
+	//"*.php",
 	"*.vue",
 	"*.ts",
 }
@@ -34,7 +36,7 @@ type branchProgressMsg struct {
 	total   int
 }
 
-type model struct {
+type gitIterateRepoModel struct {
 	bars      map[string]progress.Model
 	sizes     map[string]int
 	current   map[string]int
@@ -42,11 +44,69 @@ type model struct {
 	branchPrg progress.Model
 }
 
-func (m *model) Init() tea.Cmd {
+type gitBasicModel struct {
+	progress progress.Model
+	total    int
+	done     int
+	done2    int
+	title    string
+	message  string
+	message2 string
+}
+
+type CachedRepo struct {
+	size                  int
+	owner, repoName, path string
+	repo                  *git.Repository
+	mirror                bool
+}
+
+type countMsg struct{}
+type countMsg2 struct{}
+
+var clonedRepo *CachedRepo
+
+func (m *gitBasicModel) Init() tea.Cmd {
 	return nil
 }
 
-func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *gitBasicModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case countMsg:
+		m.done++
+		return m, nil
+	case countMsg2:
+		m.done2++
+		return m, nil
+	case tea.KeyMsg:
+		if msg.Type == tea.KeyCtrlC {
+			return m, tea.Quit
+		}
+	case tea.QuitMsg:
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
+func (m *gitBasicModel) View() string {
+	percent := float64(m.done) / float64(m.total)
+	return fmt.Sprintf(
+		"%s\n%s %d/%d %s\n%d %s",
+		m.title,
+		m.progress.ViewAs(percent),
+		m.done,
+		m.total,
+		m.message,
+		m.done2,
+		m.message2,
+	)
+}
+
+func (m *gitIterateRepoModel) Init() tea.Cmd {
+	return nil
+}
+
+func (m *gitIterateRepoModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case branchProgressMsg:
 		m.mu.Lock()
@@ -66,7 +126,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *model) View() string {
+func (m *gitIterateRepoModel) View() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -131,43 +191,109 @@ func (m *model) View() string {
 	return s
 }
 
-func getGradientColor(ratio float64) lipgloss.Color {
-	if ratio < 0.5 {
-		return "1" // Red
-	} else if ratio < 0.9 {
-		return "3" // Yellow
+func loadRepoFromPath(repoPath string, mirror bool) (*git.Repository, error) {
+	absPath, err := filepath.Abs(repoPath)
+	if err != nil {
+		return nil, err
 	}
-	return "2" // Green
+	repoURL := "file://" + filepath.ToSlash(absPath)
+
+	memStorage := memory.NewStorage()
+	repo, err := git.Clone(memStorage, nil, &git.CloneOptions{
+		URL:      repoURL,
+		Mirror:   mirror,
+		Progress: os.Stdout,
+		Tags:     git.NoTags,
+		//Depth:    10000,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return repo, nil
 }
 
-func iterateRepo(args utils.Args) []string {
-	owner, repoName := getOwnerAndRepoFromUri(args.GitUrl)
-	repoSize, err := getRepoSize(owner, repoName)
-	totalSize := 0
-	if err == nil {
-		totalSize = repoSize
+func cloneRepo(uri string, mirror bool) (*CachedRepo, error) {
+	owner, repoName := getOwnerAndRepoFromUri(uri)
+
+	if clonedRepo != nil {
+		if clonedRepo.mirror == mirror {
+			return clonedRepo, nil
+		}
 	}
 
+	dataDir := makeDataDir()
+	if dataDir == "" {
+		return nil, fmt.Errorf("data directory unavailable")
+	}
+	repoPath := filepath.Join(dataDir, owner, repoName)
+
+	var repo *git.Repository
+
+	if _, err := os.Stat(repoPath); err == nil {
+		utils.PrintInfo("Loading repository: " + repoPath)
+		repo, err = loadRepoFromPath(repoPath, mirror)
+		if err != nil {
+			utils.PrintWarning("Removing corrupted repository: " + repoPath)
+			os.RemoveAll(repoPath)
+			repo = nil
+		}
+	}
+
+	if repo == nil {
+		utils.PrintInfo("Cloning repository: " + uri + " into " + repoPath)
+
+		if err := os.MkdirAll(filepath.Dir(repoPath), 0755); err != nil {
+			return nil, err
+		}
+
+		_, err := git.PlainClone(repoPath, true, &git.CloneOptions{
+			URL:      uri,
+			Mirror:   true,
+			Progress: os.Stdout,
+			Tags:     git.NoTags,
+			Depth:    10000,
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		repo, err = loadRepoFromPath(repoPath, mirror)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	size := getRepoSize(owner, repoName)
+
+	newRepo := &CachedRepo{
+		owner:    owner,
+		repoName: repoName,
+		repo:     repo,
+		path:     repoPath,
+		size:     size,
+		mirror:   mirror,
+	}
+
+	clonedRepo = newRepo
+	return newRepo, nil
+}
+
+func iterateRepo(gitUri string) []string {
+	repository, err := cloneRepo(gitUri, true)
+	if err != nil {
+		utils.PrintError(err, "failed to clone repository")
+	}
+
+	repo := repository.repo
+
 	fmt.Println("-------------")
-	fmt.Println("Owner: ", owner)
-	fmt.Println("Repo: ", repoName)
-	fmt.Println("Size: ", totalSize)
+	fmt.Println("Owner: ", repository.owner)
+	fmt.Println("Repo: ", repository.repoName)
+	fmt.Println("Size: ", repository.size)
 	fmt.Println("-------------")
 
 	utils.PrintInfo("Cloning Repository")
-
-	repo, err := git.Clone(memory.NewStorage(), nil, &git.CloneOptions{
-		URL:        args.GitUrl,
-		Progress:   os.Stdout,
-		Mirror:     true,
-		NoCheckout: true,
-		Tags:       git.NoTags,
-	})
-	if err != nil {
-		utils.PrintError(err, "failed to clone repository")
-		return []string{}
-	}
-	utils.PrintInfo("Cloned repository: " + args.GitUrl)
 
 	utils.PrintInfo("Fetching branches")
 	branchesIter, err := repo.Branches()
@@ -187,8 +313,7 @@ func iterateRepo(args utils.Args) []string {
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 3) // Three routines parallel
 
-	// Initialize model with progress bars for each branch
-	m := &model{
+	m := &gitIterateRepoModel{
 		bars:    make(map[string]progress.Model),
 		sizes:   make(map[string]int),
 		current: make(map[string]int),
@@ -292,6 +417,206 @@ func iterateRepo(args utils.Args) []string {
 	return interestingFiles
 }
 
+func findFirstFilesCommits(repoUri string, webserverHashes map[string]plumbing.Hash) (map[string]plumbing.Hash, error) {
+	repository, err := cloneRepo(repoUri, false)
+	if err != nil {
+		return nil, err
+	}
+
+	repo := repository.repo
+
+	result := make(map[string]plumbing.Hash)
+
+	prgs := progress.New(
+		progress.WithWidth(40),
+		progress.WithoutPercentage(),
+		progress.WithScaledGradient("#FF7CCB", "#FDFF8C"),
+	)
+
+	m := &gitBasicModel{
+		progress: prgs,
+		title:    "Finding first commits",
+		message:  "files found",
+		total:    len(webserverHashes),
+		done:     0,
+		message2: "commits checked",
+		done2:    0,
+	}
+
+	p := tea.NewProgram(m)
+
+	utils.PrintInfo("Finding commits for files")
+
+	go func() {
+		if _, err := p.Run(); err != nil {
+			fmt.Println("Error running UI:", err)
+		}
+	}()
+
+	remainingFiles := make(map[string]plumbing.Hash, len(webserverHashes))
+	for k, v := range webserverHashes {
+		remainingFiles[k] = v
+	}
+
+	// Create commit iterator (reverse chronological order)
+	commitIter, err := repo.Log(&git.LogOptions{
+		Order: git.LogOrderCommitterTime,
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer commitIter.Close()
+
+	for len(remainingFiles) > 0 {
+		commit, err := commitIter.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			continue
+		}
+
+		p.Send(countMsg2{})
+
+		var parentTree *object.Tree
+		if parents := commit.Parents(); parents != nil {
+			if parent, err := parents.Next(); err == nil {
+				parentTree, _ = parent.Tree()
+			}
+		}
+
+		currentTree, err := commit.Tree()
+		if err != nil {
+			continue
+		}
+
+		changes, err := object.DiffTreeWithOptions(
+			context.Background(),
+			parentTree,
+			currentTree,
+			&object.DiffTreeOptions{
+				DetectRenames: true,
+			},
+		)
+		if err != nil {
+			continue
+		}
+
+		for _, change := range changes {
+			file := change.To.Name
+			if hash, exists := remainingFiles[file]; exists {
+				if change.To.TreeEntry.Hash == hash {
+					result[file] = commit.Hash
+					delete(remainingFiles, file)
+				}
+			}
+		}
+
+		currentProgress := len(webserverHashes) - len(remainingFiles)
+		if currentProgress > m.done {
+			m.done = currentProgress
+			p.Send(countMsg{})
+		}
+	}
+
+	p.Quit()
+	return result, nil
+}
+
+func findDeploymentRange(repoUri string, fileCommits map[string]plumbing.Hash) (plumbing.Hash, plumbing.Hash, []CommitScore, error) {
+	repository, err := cloneRepo(repoUri, false)
+	if err != nil {
+		return plumbing.Hash{}, plumbing.Hash{}, nil, err
+	}
+
+	repo := repository.repo
+
+	commitScores := make(map[plumbing.Hash]int)
+	for _, commitHash := range fileCommits {
+		commitScores[commitHash]++
+	}
+
+	utils.PrintInfo("Finding deployment range")
+
+	// Rank commits by match frequency and recency
+	var scores []CommitScore
+	for hash, count := range commitScores {
+		if commit, err := repo.CommitObject(hash); err == nil {
+			scores = append(scores, CommitScore{
+				Hash:  hash,
+				Score: count,
+				Time:  commit.Author.When,
+			})
+		}
+	}
+
+	sort.Slice(scores, func(i, j int) bool {
+		if scores[i].Score != scores[j].Score {
+			return scores[i].Score > scores[j].Score
+		}
+		return scores[i].Time.After(scores[j].Time)
+	})
+
+	if len(scores) == 0 {
+		return plumbing.ZeroHash, plumbing.ZeroHash, nil, fmt.Errorf("no matching commits found")
+	}
+
+	upperCommit := scores[0].Hash
+	lowerCommit := findNextFileChange(repo, upperCommit, fileCommits)
+
+	return upperCommit, lowerCommit, scores[:min(5, len(scores))], nil
+}
+
+func findNextFileChange(repo *git.Repository, bestCommit plumbing.Hash, fileCommits map[string]plumbing.Hash) plumbing.Hash {
+	commitIter, _ := repo.Log(&git.LogOptions{Order: git.LogOrderCommitterTime})
+	fileSet := make(map[string]struct{})
+	for f := range fileCommits {
+		fileSet[f] = struct{}{}
+	}
+
+	foundBest := false
+	for {
+		commit, err := commitIter.Next()
+		if err != nil {
+			break
+		}
+
+		if commit.Hash == bestCommit {
+			foundBest = true
+			continue
+		}
+
+		if !foundBest {
+			continue
+		}
+
+		changes, _ := getChangedFiles(commit)
+		for _, file := range changes {
+			if _, exists := fileSet[file]; exists {
+				return commit.Hash
+			}
+		}
+	}
+	return plumbing.ZeroHash
+}
+
+func getChangedFiles(commit *object.Commit) ([]string, error) {
+	if commit.NumParents() == 0 {
+		return nil, nil
+	}
+
+	parent, _ := commit.Parent(0)
+	currentTree, _ := commit.Tree()
+	parentTree, _ := parent.Tree()
+
+	changes, _ := object.DiffTree(parentTree, currentTree)
+	files := make([]string, 0, len(changes))
+	for _, change := range changes {
+		files = append(files, change.To.Name)
+	}
+	return files, nil
+}
+
 func processCommit(repo *git.Repository, hash plumbing.Hash, fileSet map[string]struct{}, p *tea.Program, branchName string, current, total int) error {
 	commit, err := repo.CommitObject(hash)
 	if err != nil {
@@ -326,26 +651,26 @@ func getOwnerAndRepoFromUri(uri string) (string, string) {
 	return uriParts[1], uriParts[2]
 }
 
-func getRepoSize(owner, repo string) (int, error) {
+func getRepoSize(owner, repo string) int {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s", owner, repo)
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return 0, err
+		return 0
 	}
 	req.Header.Set("User-Agent", "go-repo-size-checker")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return 0, err
+		return 0
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return 0, fmt.Errorf("GitHub API returned status %d", resp.StatusCode)
+		return 0
 	}
 	var info RepoInfo
 	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
-		return 0, err
+		return 0
 	}
-	return info.Size, nil
+	return info.Size
 }
 
 func filterFiles(files []string, patterns []string) []string {
@@ -366,4 +691,13 @@ func filterFiles(files []string, patterns []string) []string {
 		}
 	}
 	return filteredFiles
+}
+
+func getGradientColor(ratio float64) lipgloss.Color {
+	if ratio < 0.5 {
+		return "1" // Red
+	} else if ratio < 0.9 {
+		return "3" // Yellow
+	}
+	return "2" // Green
 }
